@@ -841,6 +841,19 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
             if (P(1)[1] == 's' && (seq(P(1), "/sys/kernel/tracing/trace_marker") || seq(P(1), "/sys/kernel/debug/tracing/trace_marker")))
                 return S4(nr, AT_FDCWD, "/dev/null", a[2], 0);
             if (seq(P(1), "/proc/meminfo")) { long r = meminfo_open(); if (r >= 0) return r; }
+            if (seq(P(1), "/proc/version")) {
+                static const char v[] = "Linux version " AEMU_FAKE_KREL
+                                        " (aemu@local) (clang 17.0.2) #1 SMP PREEMPT\n";
+                return fake_memfile("aemu-version", v, sizeof v - 1);
+            }
+            if (seq(P(1), "/proc/sys/kernel/osrelease")) {
+                static const char o[] = AEMU_FAKE_KREL "\n";
+                return fake_memfile("aemu-osrelease", o, sizeof o - 1);
+            }
+            if (seq(P(1), "/proc/sys/kernel/version")) {
+                static const char w[] = "#1 SMP PREEMPT\n";
+                return fake_memfile("aemu-kver", w, sizeof w - 1);
+            }
             if (g_is32 && pre(P(1), "/proc/")) {         // (by any of its names: self, thread-self, the process id,
                 const char *m = P(1) + 6;               // and the main thread's own entry, which is what ART 15 reads)
                 u64 me = (u64)S0(NR_getpid);
@@ -1184,6 +1197,20 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
         return r == -1 /* EPERM */ && a[1] == 8 /* RLIMIT_MEMLOCK */ && a[2] ? 0 : r;
     }
     case 164: { long r = S2(164, a[0], a[1]); return r == -1 /* EPERM */ && a[0] == 8 /* RLIMIT_MEMLOCK */ ? 0 : r; }
+    #ifndef AEMU_FAKE_KREL
+    #define AEMU_FAKE_KREL "5.10.209-android13-8-g0f3c9a1b2d4e"
+    #endif
+
+    case 160: {                     // uname：平台用这个字符串判断自己能开什么
+        long r = S1(nr, a[0]);      // 先拿真值，再覆盖 release
+        if (r == 0 && a[0]) {
+            char *u = (char *)a[0];
+            memset(u + 130, 0, 65);                       // struct utsname.release
+            memcpy(u + 130, AEMU_FAKE_KREL, sizeof(AEMU_FAKE_KREL) - 1);
+        }
+        return r;
+    }
+    
     case 280: {                                 // bpf: netd of 12 has no traffic accounting but eBPF and exits when
         // its pinned maps cannot be opened; an app cannot reach the phone's eBPF at all. The maps are stood in for by
         // empty ones: every object is a descriptor, writes are taken, lookups and walks find nothing.
@@ -1585,7 +1612,7 @@ static const u8 trapped[] = {
     NR_rt_sigaction, NR_reboot, NR_setregid, NR_setgid, NR_setreuid, NR_setuid, NR_setresuid, NR_getresuid,
     NR_setresgid, NR_getresgid, NR_setfsuid, NR_setfsgid, NR_getgroups, NR_setgroups, NR_getuid, NR_geteuid,
     NR_getgid, NR_getegid, NR_bind, NR_connect, NR_execve, NR_setsockopt, NR_unshare, NR_timerfd_create,
-    NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_writev, 92 /* personality */, 107 /* timer_create */, 119 /* sched_setscheduler */,
+    NR_close, NR_getsockopt, NR_sendto, NR_sendmsg, NR_getsockname, NR_socket, NR_dup3, NR_writev, 92 /* personality */, 107 /* timer_create */, 119 /* sched_setscheduler */, 160 /* uname */,
 };
 
 enum { L_TRAP = 240, L_ALLOW, L_SIG, L_MMAP, L_NR, L_PRCTL, L_ALL, L_MADV, L_N };
