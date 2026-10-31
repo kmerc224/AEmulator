@@ -11,7 +11,7 @@ concurrency:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 1 }
@@ -40,11 +40,17 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', 'gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build engine (API 36)
+      # 1) 上游的 32 位通用件
+      - name: Native shims (build_all.py)
+        run: python3 native/build_all.py
+
+      # 2) 改动的 64 位引擎（只编 API 36；要覆盖 15/17 就再加 sh native/guest64/build.sh 35 / 37）
+      - name: Native engine (API 36)
         run: |
           EXTRA_CFLAGS='-DAEMU_FAKE_KREL="5.10.209-android13-8-g0f3c9a1b2d4e"' \
             sh native/guest64/build.sh 36
 
+      # 3) 出包
       - name: Build APK
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -58,10 +64,10 @@ jobs:
             printf 'storeFile=keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
               "$KS_PASS" "$KS_ALIAS" "$KEY_PASS" > keystore.properties
           fi
-          ./gradlew assembleStandardRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: aemu-apk
-          path: app/build/outputs/apk/standard/release/*.apk
+          path: app/build/outputs/apk/*/release/*.apk
           if-no-files-found: error
