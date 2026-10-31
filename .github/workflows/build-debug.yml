@@ -4,7 +4,7 @@ on: [ workflow_dispatch ]
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -21,8 +21,8 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> $GITHUB_ENV
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-      - name: Build engine (API 36)
-        run: sh native/guest64/build.sh 36
+      - run: python3 native/build_all.py
+      - run: sh native/guest64/build.sh 36
 
       - name: Build APK
         run: |
