@@ -1,0 +1,177 @@
+name: Build APK (cloud)
+
+# Cloud build for AEmulator. Produces a downloadable APK artifact on every
+# relevant push and on demand via the Actions tab ("Run workflow").
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type (debug is signed with the auto-generated debug key and is directly installable)"
+        type: choice
+        required: true
+        default: debug
+        options:
+          - debug
+          - release
+      flavor:
+        description: "Product flavor"
+        type: choice
+        required: true
+        default: standard
+        options:
+          - standard
+          - clone
+          - v0003
+          - all
+      sign_release:
+        description: "Sign a release build using the SIGNING_* repository secrets (release builds only)"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "native/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - ".github/workflows/build-apk.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "native/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Assemble APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform 36 and build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          java -version
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Apply cross-platform build fixes
+        # gradle.properties shipped upstream hardcodes a Windows-only JBR path,
+        # and gradlew has no executable bit in git. Both break Linux CI.
+        run: |
+          chmod +x gradlew
+          sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+          grep -v '^org.gradle.java.home=' gradle.properties | head -5 || true
+
+      - name: Restore release signing key (optional)
+        if: ${{ inputs.build_type == 'release' && inputs.sign_release }}
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Release signing requested but SIGNING_* secrets are incomplete."
+            echo "::error::Add SIGNING_KEYSTORE_BASE64, SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS, SIGNING_KEY_PASSWORD."
+            exit 1
+          fi
+          mkdir -p keystore
+          printf '%s' "$KEYSTORE_B64" | base64 -d > keystore/release.jks
+          cat > keystore.properties <<EOF
+          storeFile=keystore/release.jks
+          storePassword=$STORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          echo "Release signing configured."
+
+      - name: Assemble APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="${{ inputs.build_type || 'debug' }}"
+          FL="${{ inputs.flavor || 'standard' }}"
+          case "$BT" in
+            debug)   B=Debug ;;
+            release) B=Release ;;
+            *) echo "Unknown build type: $BT"; exit 1 ;;
+          esac
+          if [ "$FL" = "all" ]; then
+            TASK="assemble${B}"
+          else
+            case "$FL" in
+              standard) F=Standard ;;
+              clone)    F=Clone ;;
+              v0003)    F=V0003 ;;
+              *) echo "Unknown flavor: $FL"; exit 1 ;;
+            esac
+            TASK="assemble${F}${B}"
+          fi
+          echo "Gradle task: $TASK"
+          echo "### Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Build type: \`$BT\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Flavor: \`$FL\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Task: \`$TASK\`" >> "$GITHUB_STEP_SUMMARY"
+          ./gradlew --no-daemon --stacktrace "$TASK"
+
+      - name: Collect APKs and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts
+          find app/build/outputs/apk -type f -name '*.apk' -exec cp {} build-artifacts/ \;
+          echo "APK files:"
+          ls -lh build-artifacts/*.apk
+          sha256sum build-artifacts/*.apk > build-artifacts/SHA256SUMS.txt
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh build-artifacts/*.apk >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.build_type || 'debug' }}" = "release" ] && [ "${{ inputs.sign_release }}" != "true" ]; then
+            echo "> Release APK is **unsigned** and cannot be installed as-is. Use the debug build, or configure the SIGNING_* secrets." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AEmulator-${{ inputs.build_type || 'debug' }}-${{ inputs.flavor || 'standard' }}-${{ github.run_number }}
+          path: build-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
