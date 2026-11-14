@@ -28,6 +28,21 @@ on:
         type: boolean
         required: false
         default: false
+      publish_release:
+        description: "Publish the built APK as a GitHub Release (manual runs only; off by default)"
+        type: boolean
+        required: false
+        default: false
+      release_tag:
+        description: "Release tag; leave empty for v<version>-<run number>"
+        type: string
+        required: false
+        default: ""
+      release_prerelease:
+        description: "Mark a newly created release as a pre-release"
+        type: boolean
+        required: false
+        default: true
   # Push builds are handled by build-full.yml (full native rebuild). This
   # workflow stays available for on-demand fast APK builds and PR checks.
   pull_request:
@@ -52,6 +67,8 @@ jobs:
     name: Assemble APK
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      version: ${{ steps.collect.outputs.version }}
 
     steps:
       - name: Checkout
@@ -167,6 +184,7 @@ jobs:
           ./gradlew --no-daemon --stacktrace "$TASK"
 
       - name: Collect APKs and checksums
+        id: collect
         shell: bash
         run: |
           set -euo pipefail
@@ -175,6 +193,8 @@ jobs:
           echo "APK files:"
           ls -lh build-artifacts/*.apk
           sha256sum build-artifacts/*.apk > build-artifacts/SHA256SUMS.txt
+          VER=$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[0-9A-Za-z.+-]+"' app/build.gradle.kts | head -1 | cut -d'"' -f2)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           ls -lh build-artifacts/*.apk >> "$GITHUB_STEP_SUMMARY"
@@ -191,3 +211,66 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+  # Optional release publishing. Runs only when the workflow is started by hand
+  # with the publish_release switch enabled; PR builds never create releases.
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AEmulator-${{ inputs.build_type || 'debug' }}-${{ inputs.flavor || 'standard' }}-${{ github.run_number }}
+          path: release-assets
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_INPUT: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.release_prerelease }}
+          VERSION: ${{ needs.build.outputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          COMMIT_SHA: ${{ github.sha }}
+          BUILD_TYPE: ${{ inputs.build_type || 'debug' }}
+          FLAVOR: ${{ inputs.flavor || 'standard' }}
+        run: |
+          set -euo pipefail
+          TAG="$TAG_INPUT"
+          if [ -z "$TAG" ]; then TAG="v${VERSION}-${RUN_NUMBER}"; fi
+          {
+            echo "Automated fast APK build of AEmulator."
+            echo ""
+            echo "- Commit: \`$COMMIT_SHA\`"
+            echo "- Build type: \`$BUILD_TYPE\`, flavor: \`$FLAVOR\`"
+            echo "- Workflow run: $SERVER_URL/$GH_REPO/actions/runs/$RUN_ID"
+            echo "- APK checksums: \`SHA256SUMS.txt\`"
+          } > notes.md
+          shopt -s nullglob
+          ASSETS=(release-assets/*.apk release-assets/SHA256SUMS.txt)
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "::error::No APK found in the downloaded artifact"
+            exit 1
+          fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            echo "Updated existing release $TAG"
+          elif [ "$PRERELEASE" = "true" ]; then
+            gh release create "$TAG" "${ASSETS[@]}" --prerelease --title "AEmulator $TAG" --notes-file notes.md
+            echo "Created pre-release $TAG"
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --title "AEmulator $TAG" --notes-file notes.md
+            echo "Created release $TAG"
+          fi
+          echo "### Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "$SERVER_URL/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
