@@ -23,8 +23,13 @@ on:
   push:
     branches: [main]
     paths:
+      - "app/**"
       - "native/**"
-      - ".github/scripts/build-native.sh"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - ".github/scripts/**"
       - ".github/workflows/build-full.yml"
 
 permissions:

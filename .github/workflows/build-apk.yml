@@ -28,16 +28,8 @@ on:
         type: boolean
         required: false
         default: false
-  push:
-    branches: [main]
-    paths:
-      - "app/**"
-      - "native/**"
-      - "gradle/**"
-      - "*.gradle.kts"
-      - "gradle.properties"
-      - "gradlew"
-      - ".github/workflows/build-apk.yml"
+  # Push builds are handled by build-full.yml (full native rebuild). This
+  # workflow stays available for on-demand fast APK builds and PR checks.
   pull_request:
     paths:
       - "app/**"

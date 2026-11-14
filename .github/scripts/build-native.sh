@@ -166,6 +166,8 @@ PY
 cat "$REPORT/summary.md" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 cat "$REPORT/summary.md"
 
+echo "::notice::Full native rebuild: $OK succeeded / $FAIL failed / $SKIP skipped; engine binaries: $CHANGED changed, $ADDED added, $REMOVED removed"
+
 if [ "$FAIL" -gt 0 ]; then
   echo "::warning::$FAIL native build script(s) failed; inspect native-build-report/failures.txt"
 fi
