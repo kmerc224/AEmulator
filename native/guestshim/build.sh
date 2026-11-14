@@ -8,7 +8,7 @@ mkdir -p "$(dirname "$OUT")"
 "$CC" --target=armv7a-linux-androideabi21 -march=armv7-a -mthumb -Os -fPIC -shared -nostdlib \
   -fvisibility=hidden -fno-stack-protector -ffreestanding -fno-builtin -Wl,--hash-style=sysv -Wl,-z,norelro -Wl,--no-undefined \
   -Wl,-soname,libaemushim.so -Wl,--build-id=none -o "$OUT" aemushim.c crash.c -lc
-"$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip" "$OUT" 2>/dev/null || true
+"$(dirname "$CC")/llvm-strip" "$OUT" 2>/dev/null || true
 # пустая программа вместо iptables/ip6tables
 BIN="$(dirname "$CC")"
 "$CC" --target=armv7a-linux-androideabi21 -nostdlib -static -Wl,--build-id=none \

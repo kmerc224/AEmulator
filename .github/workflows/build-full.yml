@@ -1,0 +1,175 @@
+name: Full source build (native + APK)
+
+# Rebuilds every native component that has source in this repository, then
+# assembles the APK from the freshly built binaries. Nothing is committed back:
+# the rebuilt binaries, per-script logs and a SHA-256 diff are uploaded as an
+# artifact so the result can be compared with the shipped prebuilt files.
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "APK build type"
+        type: choice
+        required: true
+        default: debug
+        options:
+          - debug
+          - release
+      include_test_tools:
+        description: "Also build the standalone guest test APKs in tools/"
+        type: boolean
+        required: false
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "native/**"
+      - ".github/scripts/build-native.sh"
+      - ".github/workflows/build-full.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-build:
+    name: Rebuild native + assemble APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-}"
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then SDK=/usr/local/lib/android/sdk; fi
+          for c in "$SDK/cmdline-tools/latest/bin/sdkmanager" "$SDK/cmdline-tools/bin/sdkmanager" "$SDK/tools/bin/sdkmanager"; do
+            if [ -x "$c" ]; then SDKMGR="$c"; break; fi
+          done
+          if [ -z "${SDKMGR:-}" ]; then
+            echo "::error::sdkmanager not found under $SDK"
+            ls -R "$SDK" | head -60
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDKMGR=$SDKMGR" >> "$GITHUB_ENV"
+          echo "Using $SDKMGR"
+
+      - name: Install SDK 36, build tools and NDK r28
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          NDK_VER=$("$SDKMGR" --list 2>/dev/null | grep -oE 'ndk;28\.[0-9.]+' | sed 's/^ndk;//' | sort -uV | tail -1 || true)
+          if [ -z "$NDK_VER" ]; then
+            echo "::error::No NDK r28 found in the SDK package list"
+            exit 1
+          fi
+          echo "NDK r28: $NDK_VER"
+          NDK_DIR="$ANDROID_HOME/ndk/$NDK_VER"
+          if [ ! -x "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            "$SDKMGR" --install "ndk;$NDK_VER"
+          fi
+          test -x "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK_VERSION=$NDK_VER" >> "$GITHUB_ENV"
+          "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -3
+
+      - name: Set up build tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHIM="$RUNNER_TEMP/bin"
+          mkdir -p "$SHIM"
+          ln -sf "$(command -v python3)" "$SHIM/python"
+          echo "$SHIM" >> "$GITHUB_PATH"
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -alias androiddebugkey -keypass android -storepass android \
+              -keystore "$HOME/.android/debug.keystore" -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" -storetype JKS
+          fi
+          chmod +x gradlew
+          sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+          python3 --version
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties', 'gradle.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Rebuild all native components
+        shell: bash
+        env:
+          INCLUDE_TEST_TOOLS: ${{ inputs.include_test_tools || 'true' }}
+        run: bash .github/scripts/build-native.sh
+
+      - name: Assemble APK from rebuilt binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="${{ inputs.build_type || 'debug' }}"
+          case "$BT" in
+            debug)   B=Debug ;;
+            release) B=Release ;;
+            *) echo "Unknown build type: $BT"; exit 1 ;;
+          esac
+          echo "### Full build" >> "$GITHUB_STEP_SUMMARY"
+          echo "- NDK: \`$NDK_VERSION\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Gradle task: \`assembleStandard${B}\`" >> "$GITHUB_STEP_SUMMARY"
+          ./gradlew --no-daemon --stacktrace "assembleStandard${B}"
+          if [ "$BT" = "release" ]; then
+            echo "> Release APK is unsigned; use the debug build or configure SIGNING_* secrets." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Collect APK and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apk-artifacts
+          find app/build/outputs/apk -type f -name '*.apk' -exec cp {} apk-artifacts/ \;
+          ls -lh apk-artifacts/*.apk
+          sha256sum apk-artifacts/*.apk > apk-artifacts/SHA256SUMS.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AEmulator-full-${{ inputs.build_type || 'debug' }}-${{ github.run_number }}
+          path: apk-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload native rebuild report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-rebuild-report-${{ github.run_number }}
+          path: native-build-report/
+          if-no-files-found: warn
+          retention-days: 30
